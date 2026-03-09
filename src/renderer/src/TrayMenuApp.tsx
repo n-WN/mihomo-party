@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button, ScrollShadow, Chip, Accordion, AccordionItem } from '@heroui/react'
 import { IoRefresh, IoClose, IoCheckmarkCircle } from 'react-icons/io5'
 import { useGroups } from './hooks/use-groups'
@@ -11,6 +11,8 @@ interface TrafficData {
   down: number
 }
 
+const TRAFFIC_UPDATE_INTERVAL = 250
+
 const TrayMenuApp: React.FC = () => {
   const { groups, mutate } = useGroups()
   const { appConfig } = useAppConfig()
@@ -18,13 +20,32 @@ const TrayMenuApp: React.FC = () => {
 
   const [traffic, setTraffic] = useState<TrafficData>({ up: 0, down: 0 })
   const [testingGroup, setTestingGroup] = useState<string | null>(null)
+  const trafficTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const latestTrafficRef = useRef<TrafficData | null>(null)
 
   useEffect(() => {
-    window.electron.ipcRenderer.on('mihomoTraffic', (_e, info: TrafficData) => {
-      setTraffic(info)
-    })
-    return () => {
-      window.electron.ipcRenderer.removeAllListeners('mihomoTraffic')
+    const flushTraffic = (): void => {
+      const info = latestTrafficRef.current
+      trafficTimerRef.current = null
+      latestTrafficRef.current = null
+      if (!info) return
+      setTraffic((prev) => (prev.up === info.up && prev.down === info.down ? prev : info))
+    }
+
+    const handleTraffic = (_e: unknown, info: TrafficData): void => {
+      latestTrafficRef.current = info
+      if (trafficTimerRef.current) return
+      trafficTimerRef.current = setTimeout(flushTraffic, TRAFFIC_UPDATE_INTERVAL)
+    }
+
+    window.electron.ipcRenderer.on('mihomoTraffic', handleTraffic)
+    return (): void => {
+      window.electron.ipcRenderer.removeListener('mihomoTraffic', handleTraffic)
+      if (trafficTimerRef.current) {
+        clearTimeout(trafficTimerRef.current)
+      }
+      trafficTimerRef.current = null
+      latestTrafficRef.current = null
     }
   }, [])
 
@@ -98,7 +119,9 @@ const TrayMenuApp: React.FC = () => {
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-content1 rounded-xl border border-divider">
       <div className="flex items-center justify-between px-3 py-2 border-b border-divider bg-content2/50">
         <div className="flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full bg-primary animate-pulse shadow-lg shadow-primary/50" />
+          <div
+            className={`w-2 h-2 rounded-full bg-primary ${disableAnimation ? '' : 'animate-pulse shadow-lg shadow-primary/50'}`}
+          />
           <span className="text-sm font-semibold">Sparkle</span>
         </div>
         <div className="flex items-center gap-1">

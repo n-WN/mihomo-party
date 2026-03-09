@@ -65,13 +65,15 @@ export const OverrideConfigProvider: React.FC<{ children: ReactNode }> = ({ chil
   }
 
   useEffect(() => {
-    window.electron.ipcRenderer.on('overrideConfigUpdated', () => {
+    const handleUpdated = (): void => {
       mutateOverrideConfig()
-    })
-    return (): void => {
-      window.electron.ipcRenderer.removeAllListeners('overrideConfigUpdated')
     }
-  }, [])
+
+    window.electron.ipcRenderer.on('overrideConfigUpdated', handleUpdated)
+    return (): void => {
+      window.electron.ipcRenderer.removeListener('overrideConfigUpdated', handleUpdated)
+    }
+  }, [mutateOverrideConfig])
 
   return (
     <OverrideConfigContext.Provider

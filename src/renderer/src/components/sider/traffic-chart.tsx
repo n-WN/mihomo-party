@@ -54,9 +54,24 @@ const TrafficChart: React.FC<TrafficChartProps> = (props) => {
   )
 }
 
+const isSameTrafficData = (
+  prevData: TrafficChartProps['data'],
+  nextData: TrafficChartProps['data']
+): boolean => {
+  if (prevData === nextData) return true
+  if (prevData.length !== nextData.length) return false
+
+  for (let i = 0; i < prevData.length; i++) {
+    if (prevData[i].traffic !== nextData[i].traffic || prevData[i].index !== nextData[i].index) {
+      return false
+    }
+  }
+
+  return true
+}
+
 export default React.memo(TrafficChart, (prevProps, nextProps) => {
   return (
-    prevProps.isActive === nextProps.isActive &&
-    JSON.stringify(prevProps.data) === JSON.stringify(nextProps.data)
+    prevProps.isActive === nextProps.isActive && isSameTrafficData(prevProps.data, nextProps.data)
   )
 })

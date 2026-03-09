@@ -11,12 +11,21 @@ import { mihomoIpcPath } from '../utils/dirs'
 let axiosIns: AxiosInstance = null!
 let mihomoTrafficWs: WebSocket | null = null
 let trafficRetry = 10
+let latestTraffic: ControllerTraffic | null = null
+let trafficFlushTimer: NodeJS.Timeout | null = null
+let lastTrafficPushAt = 0
 let mihomoMemoryWs: WebSocket | null = null
 let memoryRetry = 10
+let latestMemory: ControllerMemory | null = null
+let memoryFlushTimer: NodeJS.Timeout | null = null
+let lastMemoryPushAt = 0
 let mihomoLogsWs: WebSocket | null = null
 let logsRetry = 10
 let mihomoConnectionsWs: WebSocket | null = null
 let connectionsRetry = 10
+
+const TRAFFIC_PUSH_INTERVAL = 250
+const MEMORY_PUSH_INTERVAL = 1000
 
 export const getAxios = async (force: boolean = false): Promise<AxiosInstance> => {
   const currentSocketPath = mihomoIpcPath()
@@ -218,7 +227,49 @@ export const startMihomoTraffic = async (): Promise<void> => {
   await mihomoTraffic()
 }
 
+const dispatchTraffic = (json: ControllerTraffic): void => {
+  try {
+    mainWindow?.webContents.send('mihomoTraffic', json)
+    if (process.platform !== 'linux') {
+      tray?.setToolTip(
+        '↑' +
+          `${calcTraffic(json.up)}/s`.padStart(9) +
+          '\n↓' +
+          `${calcTraffic(json.down)}/s`.padStart(9)
+      )
+    }
+    floatingWindow?.webContents.send('mihomoTraffic', json)
+  } catch {
+    // ignore
+  }
+}
+
+const flushTraffic = (): void => {
+  trafficFlushTimer = null
+  if (!latestTraffic) return
+  const nextTraffic = latestTraffic
+  latestTraffic = null
+  lastTrafficPushAt = Date.now()
+  dispatchTraffic(nextTraffic)
+}
+
+const scheduleTrafficDispatch = (json: ControllerTraffic): void => {
+  latestTraffic = json
+  const waitMs = TRAFFIC_PUSH_INTERVAL - (Date.now() - lastTrafficPushAt)
+  if (waitMs <= 0) {
+    flushTraffic()
+    return
+  }
+  if (trafficFlushTimer) return
+  trafficFlushTimer = setTimeout(flushTraffic, waitMs)
+}
+
 export const stopMihomoTraffic = (): void => {
+  if (trafficFlushTimer) {
+    clearTimeout(trafficFlushTimer)
+    trafficFlushTimer = null
+  }
+  latestTraffic = null
   if (mihomoTrafficWs) {
     mihomoTrafficWs.removeAllListeners()
     if (mihomoTrafficWs.readyState === WebSocket.OPEN) {
@@ -235,20 +286,7 @@ const mihomoTraffic = async (): Promise<void> => {
     const data = e.data as string
     const json = JSON.parse(data) as ControllerTraffic
     trafficRetry = 10
-    try {
-      mainWindow?.webContents.send('mihomoTraffic', json)
-      if (process.platform !== 'linux') {
-        tray?.setToolTip(
-          '↑' +
-            `${calcTraffic(json.up)}/s`.padStart(9) +
-            '\n↓' +
-            `${calcTraffic(json.down)}/s`.padStart(9)
-        )
-      }
-      floatingWindow?.webContents.send('mihomoTraffic', json)
-    } catch {
-      // ignore
-    }
+    scheduleTrafficDispatch(json)
   }
 
   mihomoTrafficWs.onclose = (): void => {
@@ -266,11 +304,44 @@ const mihomoTraffic = async (): Promise<void> => {
   }
 }
 
+const dispatchMemory = (json: ControllerMemory): void => {
+  try {
+    mainWindow?.webContents.send('mihomoMemory', json)
+  } catch {
+    // ignore
+  }
+}
+
+const flushMemory = (): void => {
+  memoryFlushTimer = null
+  if (!latestMemory) return
+  const nextMemory = latestMemory
+  latestMemory = null
+  lastMemoryPushAt = Date.now()
+  dispatchMemory(nextMemory)
+}
+
+const scheduleMemoryDispatch = (json: ControllerMemory): void => {
+  latestMemory = json
+  const waitMs = MEMORY_PUSH_INTERVAL - (Date.now() - lastMemoryPushAt)
+  if (waitMs <= 0) {
+    flushMemory()
+    return
+  }
+  if (memoryFlushTimer) return
+  memoryFlushTimer = setTimeout(flushMemory, waitMs)
+}
+
 export const startMihomoMemory = async (): Promise<void> => {
   await mihomoMemory()
 }
 
 export const stopMihomoMemory = (): void => {
+  if (memoryFlushTimer) {
+    clearTimeout(memoryFlushTimer)
+    memoryFlushTimer = null
+  }
+  latestMemory = null
   if (mihomoMemoryWs) {
     mihomoMemoryWs.removeAllListeners()
     if (mihomoMemoryWs.readyState === WebSocket.OPEN) {
@@ -287,7 +358,7 @@ const mihomoMemory = async (): Promise<void> => {
     const data = e.data as string
     memoryRetry = 10
     try {
-      mainWindow?.webContents.send('mihomoMemory', JSON.parse(data) as ControllerMemory)
+      scheduleMemoryDispatch(JSON.parse(data) as ControllerMemory)
     } catch {
       // ignore
     }

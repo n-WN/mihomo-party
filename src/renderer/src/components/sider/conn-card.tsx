@@ -51,28 +51,31 @@ const ConnCard: React.FC<Props> = (props) => {
       .fill(0)
       .map((v, i) => ({ traffic: v, index: i }))
   )
-  const updateTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const chartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const latestTrafficRef = useRef<ControllerTraffic | null>(null)
 
   const transform = tf ? { x: tf.x, y: tf.y, scaleX: 1, scaleY: 1 } : null
 
   useEffect(() => {
     const handleTraffic = async (_e: unknown, info: ControllerTraffic): Promise<void> => {
-      setUpload(info.up)
-      setDownload(info.down)
+      setUpload((prev) => (prev === info.up ? prev : info.up))
+      setDownload((prev) => (prev === info.down ? prev : info.down))
 
-      if (updateTimeoutRef.current) {
-        clearTimeout(updateTimeoutRef.current)
+      latestTrafficRef.current = info
+      if (!chartTimerRef.current) {
+        chartTimerRef.current = setTimeout(() => {
+          const latestTraffic = latestTrafficRef.current
+          chartTimerRef.current = null
+          latestTrafficRef.current = null
+          if (!latestTraffic) return
+          setTrafficData((prev) => {
+            const newData = [...prev]
+            newData.shift()
+            newData.push({ traffic: latestTraffic.up + latestTraffic.down, index: Date.now() })
+            return newData
+          })
+        }, 250)
       }
-
-      updateTimeoutRef.current = setTimeout(() => {
-        setTrafficData((prev) => {
-          const newData = [...prev]
-          newData.shift()
-          newData.push({ traffic: info.up + info.down, index: Date.now() })
-          return newData
-        })
-        updateTimeoutRef.current = null
-      }, 100)
 
       if (platform === 'darwin' && showTrafficRef.current) {
         if (drawing) return
@@ -95,10 +98,12 @@ const ConnCard: React.FC<Props> = (props) => {
     window.electron.ipcRenderer.on('mihomoTraffic', handleTraffic)
 
     return (): void => {
-      window.electron.ipcRenderer.removeAllListeners('mihomoTraffic')
-      if (updateTimeoutRef.current) {
-        clearTimeout(updateTimeoutRef.current)
+      window.electron.ipcRenderer.removeListener('mihomoTraffic', handleTraffic)
+      if (chartTimerRef.current) {
+        clearTimeout(chartTimerRef.current)
       }
+      chartTimerRef.current = null
+      latestTrafficRef.current = null
     }
   }, [])
 

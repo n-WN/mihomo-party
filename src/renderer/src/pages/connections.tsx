@@ -40,6 +40,7 @@ const Connections: React.FC = () => {
   const [isDetailModalOpen, setIsDetailModalOpen] = useState(false)
   const [isSettingModalOpen, setIsSettingModalOpen] = useState(false)
   const [selected, setSelected] = useState<ControllerConnectionDetail>()
+  const [nowMinuteTick, setNowMinuteTick] = useState(() => Math.floor(Date.now() / 60000))
 
   const [iconMap, setIconMap] = useState<Record<string, string>>({})
   const [appNameCache, setAppNameCache] = useState<Record<string, string>>({})
@@ -49,6 +50,9 @@ const Connections: React.FC = () => {
   const [paused, setPaused] = useState(false)
   const pausedRef = useRef(paused)
   const [deletedIds, setDeletedIds] = useState<Set<string>>(new Set())
+  const allConnectionsRef = useRef<ControllerConnectionDetail[]>(cachedConnections)
+  const activeConnectionsRef = useRef<ControllerConnectionDetail[]>([])
+  const deletedIdsRef = useRef<Set<string>>(new Set())
 
   const iconRequestQueue = useRef(new Set<string>())
   const processingIcons = useRef(new Set<string>())
@@ -125,9 +129,14 @@ const Connections: React.FC = () => {
     if (closedConnections.length === 0) return
 
     const trashIds = closedConnections.map((conn) => conn.id)
-    setDeletedIds((prev) => new Set([...prev, ...trashIds]))
+    setDeletedIds((prev) => {
+      const next = new Set([...prev, ...trashIds])
+      deletedIdsRef.current = next
+      return next
+    })
     setAllConnections((allConns) => {
       const updatedConnections = allConns.filter((conn) => !trashIds.includes(conn.id))
+      allConnectionsRef.current = updatedConnections
       cachedConnections = updatedConnections
       return updatedConnections
     })
@@ -135,9 +144,14 @@ const Connections: React.FC = () => {
   }, [closedConnections])
 
   const trashClosedConnection = useCallback((id: string): void => {
-    setDeletedIds((prev) => new Set([...prev, id]))
+    setDeletedIds((prev) => {
+      const next = new Set([...prev, id])
+      deletedIdsRef.current = next
+      return next
+    })
     setAllConnections((allConns) => {
       const updatedConnections = allConns.filter((conn) => conn.id !== id)
+      allConnectionsRef.current = updatedConnections
       cachedConnections = updatedConnections
       return updatedConnections
     })
@@ -162,8 +176,11 @@ const Connections: React.FC = () => {
 
       if (!info.connections) return
 
-      const prevActiveMap = new Map(activeConnections.map((conn) => [conn.id, conn]))
-      const existingConnectionIds = new Set(allConnections.map((conn) => conn.id))
+      const previousActiveConnections = activeConnectionsRef.current
+      const previousAllConnections = allConnectionsRef.current
+      const deletedConnectionIds = deletedIdsRef.current
+      const prevActiveMap = new Map(previousActiveConnections.map((conn) => [conn.id, conn]))
+      const existingConnectionIds = new Set(previousAllConnections.map((conn) => conn.id))
 
       const now = Date.now()
       const activeConnIds = new Set(info.connections.map((conn) => conn.id))
@@ -190,56 +207,66 @@ const Connections: React.FC = () => {
         }
       })
 
+      const activeConnMap = new Map(activeConns.map((conn) => [conn.id, conn]))
       const newConnections = activeConns.filter(
-        (conn) => !existingConnectionIds.has(conn.id) && !deletedIds.has(conn.id)
+        (conn) => !existingConnectionIds.has(conn.id) && !deletedConnectionIds.has(conn.id)
       )
+      const mergedConnections =
+        newConnections.length > 0
+          ? [...previousAllConnections, ...newConnections]
+          : previousAllConnections
 
-      if (newConnections.length > 0) {
-        const updatedAllConnections = [...allConnections, ...newConnections]
+      const allConns = mergedConnections.map((conn) => {
+        const activeConn = activeConnMap.get(conn.id)
+        if (activeConn) return activeConn
+        const lastActive = lastActiveTime.current.get(conn.id) || 0
+        const isStillActive = now - lastActive < 1000
+        return { ...conn, isActive: isStillActive, downloadSpeed: 0, uploadSpeed: 0 }
+      })
 
-        const allConns = updatedAllConnections.map((conn) => {
-          const activeConn = activeConns.find((ac) => ac.id === conn.id)
-          if (activeConn) return activeConn
-          const lastActive = lastActiveTime.current.get(conn.id) || 0
-          const isStillActive = now - lastActive < 1000
-          return { ...conn, isActive: isStillActive, downloadSpeed: 0, uploadSpeed: 0 }
-        })
+      const finalAllConnections = allConns.slice(-(activeConns.length + 200))
+      const closedConns = finalAllConnections.filter((conn) => !conn.isActive)
 
-        const closedConns = allConns.filter((conn) => !conn.isActive)
-
-        setActiveConnections(activeConns)
-        setClosedConnections(closedConns)
-        const finalAllConnections = allConns.slice(-(activeConns.length + 200))
-        setAllConnections(finalAllConnections)
-        cachedConnections = finalAllConnections
-      } else {
-        const allConns = allConnections.map((conn) => {
-          const activeConn = activeConns.find((ac) => ac.id === conn.id)
-          if (activeConn) return activeConn
-          const lastActive = lastActiveTime.current.get(conn.id) || 0
-          const isStillActive = now - lastActive < 1000
-          return { ...conn, isActive: isStillActive, downloadSpeed: 0, uploadSpeed: 0 }
-        })
-
-        const closedConns = allConns.filter((conn) => !conn.isActive)
-
-        setActiveConnections(activeConns)
-        setClosedConnections(closedConns)
-        setAllConnections(allConns)
-        cachedConnections = allConns
-      }
+      activeConnectionsRef.current = activeConns
+      allConnectionsRef.current = finalAllConnections
+      setActiveConnections(activeConns)
+      setClosedConnections(closedConns)
+      setAllConnections(finalAllConnections)
+      cachedConnections = finalAllConnections
     }
 
     window.electron.ipcRenderer.on('mihomoConnections', handleConnections)
 
     return (): void => {
-      window.electron.ipcRenderer.removeAllListeners('mihomoConnections')
+      window.electron.ipcRenderer.removeListener('mihomoConnections', handleConnections)
     }
-  }, [allConnections, activeConnections, closedConnections, deletedIds])
+  }, [])
 
   useEffect(() => {
     pausedRef.current = paused
   }, [paused])
+
+  useEffect(() => {
+    allConnectionsRef.current = allConnections
+  }, [allConnections])
+
+  useEffect(() => {
+    activeConnectionsRef.current = activeConnections
+  }, [activeConnections])
+
+  useEffect(() => {
+    deletedIdsRef.current = deletedIds
+  }, [deletedIds])
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNowMinuteTick(Math.floor(Date.now() / 60000))
+    }, 60000)
+
+    return (): void => {
+      clearInterval(timer)
+    }
+  }, [])
 
   const processAppNameQueue = useCallback(async () => {
     if (processingAppNames.current.size >= 3 || appNameRequestQueue.current.size === 0) return
@@ -442,10 +469,10 @@ const Connections: React.FC = () => {
         <ConnectionItem
           setSelected={setSelected}
           setIsDetailModalOpen={setIsDetailModalOpen}
-          selected={selected}
           iconUrl={iconUrl}
           displayIcon={displayIcon && findProcessMode !== 'off'}
           displayName={displayName}
+          nowMinuteTick={nowMinuteTick}
           close={closeConnection}
           index={i}
           key={itemKey}
@@ -457,11 +484,11 @@ const Connections: React.FC = () => {
       displayIcon,
       iconMap,
       firstItemRefreshTrigger,
-      selected,
       closeConnection,
       appNameCache,
       findProcessMode,
-      displayAppName
+      displayAppName,
+      nowMinuteTick
     ]
   )
 

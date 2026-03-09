@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import MihomoIcon from './components/base/mihomo-icon'
 import { calcTraffic } from './utils/calc'
 import { showContextMenu, triggerMainWindow } from './utils/ipc'
 import { useAppConfig } from './hooks/use-app-config'
 import { useControledMihomoConfig } from './hooks/use-controled-mihomo-config'
+
+const TRAFFIC_UPDATE_INTERVAL = 250
 
 const FloatingApp: React.FC = () => {
   const { appConfig } = useAppConfig()
@@ -15,46 +17,52 @@ const FloatingApp: React.FC = () => {
 
   const [upload, setUpload] = useState(0)
   const [download, setDownload] = useState(0)
+  const trafficTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const latestTrafficRef = useRef<ControllerTraffic | null>(null)
 
-  // 根据总速率计算旋转速度
-  const spinSpeed = useMemo(() => {
+  const spinDuration = useMemo(() => {
+    if (!spinFloatingIcon || disableAnimation) return null
+
     const total = upload + download
-    if (total === 0) return 0
-    if (total < 1024) return 2
-    if (total < 1024 * 1024) return 3
-    if (total < 1024 * 1024 * 1024) return 4
-    return 5
-  }, [upload, download])
+    if (total === 0) return null
+    if (total < 1024) return 2.8
+    if (total < 1024 * 1024) return 2.2
+    if (total < 1024 * 1024 * 1024) return 1.6
+    return 1.2
+  }, [disableAnimation, download, spinFloatingIcon, upload])
 
-  const [rotation, setRotation] = useState(0)
+  const floatingThumbStyle = useMemo(() => {
+    if (!spinDuration) return undefined
+    return {
+      animation: `spin ${spinDuration}s linear infinite`,
+      willChange: 'transform' as const
+    }
+  }, [spinDuration])
 
   useEffect(() => {
-    if (!spinFloatingIcon || disableAnimation) return
-
-    let animationFrameId: number
-    const animate = (): void => {
-      setRotation((prev) => {
-        if (prev === 360) {
-          return 0
-        }
-        return prev + spinSpeed
-      })
-      animationFrameId = requestAnimationFrame(animate)
+    const flushTraffic = (): void => {
+      const info = latestTrafficRef.current
+      trafficTimerRef.current = null
+      latestTrafficRef.current = null
+      if (!info) return
+      setUpload((prev) => (prev === info.up ? prev : info.up))
+      setDownload((prev) => (prev === info.down ? prev : info.down))
     }
 
-    animationFrameId = requestAnimationFrame(animate)
-    return (): void => {
-      cancelAnimationFrame(animationFrameId)
+    const handleTraffic = (_e: unknown, info: ControllerTraffic): void => {
+      latestTrafficRef.current = info
+      if (trafficTimerRef.current) return
+      trafficTimerRef.current = setTimeout(flushTraffic, TRAFFIC_UPDATE_INTERVAL)
     }
-  }, [disableAnimation, spinSpeed, spinFloatingIcon])
 
-  useEffect(() => {
-    window.electron.ipcRenderer.on('mihomoTraffic', async (_e, info: ControllerTraffic) => {
-      setUpload(info.up)
-      setDownload(info.down)
-    })
+    window.electron.ipcRenderer.on('mihomoTraffic', handleTraffic)
     return (): void => {
-      window.electron.ipcRenderer.removeAllListeners('mihomoTraffic')
+      window.electron.ipcRenderer.removeListener('mihomoTraffic', handleTraffic)
+      if (trafficTimerRef.current) {
+        clearTimeout(trafficTimerRef.current)
+      }
+      trafficTimerRef.current = null
+      latestTrafficRef.current = null
     }
   }, [])
 
@@ -70,14 +78,7 @@ const FloatingApp: React.FC = () => {
             onClick={() => {
               triggerMainWindow()
             }}
-            style={
-              spinFloatingIcon && !disableAnimation
-                ? {
-                    transform: `rotate(${rotation}deg)`,
-                    transition: 'transform 0.15s linear'
-                  }
-                : {}
-            }
+            style={floatingThumbStyle}
             className={`app-nodrag cursor-pointer floating-thumb ${tunEnabled ? 'bg-secondary' : sysProxyEnabled ? 'bg-primary' : 'bg-default'} hover:opacity-hover rounded-full h-[calc(100%-4px)] aspect-square`}
           >
             <MihomoIcon className="floating-icon text-primary-foreground h-full leading-full text-[22px] mx-auto" />

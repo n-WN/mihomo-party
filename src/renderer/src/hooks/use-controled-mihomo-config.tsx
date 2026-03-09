@@ -29,13 +29,15 @@ export const ControledMihomoConfigProvider: React.FC<{ children: ReactNode }> = 
   }
 
   React.useEffect(() => {
-    window.electron.ipcRenderer.on('controledMihomoConfigUpdated', () => {
+    const handleUpdated = (): void => {
       mutateControledMihomoConfig()
-    })
-    return (): void => {
-      window.electron.ipcRenderer.removeAllListeners('controledMihomoConfigUpdated')
     }
-  }, [])
+
+    window.electron.ipcRenderer.on('controledMihomoConfigUpdated', handleUpdated)
+    return (): void => {
+      window.electron.ipcRenderer.removeListener('controledMihomoConfigUpdated', handleUpdated)
+    }
+  }, [mutateControledMihomoConfig])
 
   return (
     <ControledMihomoConfigContext.Provider

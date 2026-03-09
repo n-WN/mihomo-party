@@ -1,7 +1,7 @@
 import { Button, Card, CardBody, CardFooter, Tooltip } from '@heroui/react'
 import { calcTraffic } from '@renderer/utils/calc'
 import { mihomoVersion, restartCore } from '@renderer/utils/ipc'
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { IoMdRefresh } from 'react-icons/io'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -14,6 +14,8 @@ import { LuCpu } from 'react-icons/lu'
 interface Props {
   iconOnly?: boolean
 }
+
+const MEMORY_UPDATE_INTERVAL = 1000
 
 const MihomoCoreCard: React.FC<Props> = (props) => {
   const { appConfig } = useAppConfig()
@@ -39,23 +41,44 @@ const MihomoCoreCard: React.FC<Props> = (props) => {
   const transform = tf ? { x: tf.x, y: tf.y, scaleX: 1, scaleY: 1 } : null
   const [mem, setMem] = useState(0)
   const [restarting, setRestarting] = useState(false)
+  const memoryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const latestMemoryRef = useRef<number | null>(null)
 
   useEffect(() => {
+    const flushMemory = (): void => {
+      const nextMem = latestMemoryRef.current
+      memoryTimerRef.current = null
+      latestMemoryRef.current = null
+      if (nextMem === null) return
+      setMem((prev) => (prev === nextMem ? prev : nextMem))
+    }
+
+    const handleMemory = (_e: unknown, info: ControllerMemory): void => {
+      latestMemoryRef.current = info.inuse
+      if (memoryTimerRef.current) return
+      memoryTimerRef.current = setTimeout(flushMemory, MEMORY_UPDATE_INTERVAL)
+    }
+
+    const handleCoreStarted = (): void => {
+      mutate()
+    }
+
     const token = PubSub.subscribe('mihomo-core-changed', () => {
       mutate()
     })
-    window.electron.ipcRenderer.on('mihomoMemory', (_e, info: ControllerMemory) => {
-      setMem(info.inuse)
-    })
-    window.electron.ipcRenderer.on('core-started', () => {
-      mutate()
-    })
+    window.electron.ipcRenderer.on('mihomoMemory', handleMemory)
+    window.electron.ipcRenderer.on('core-started', handleCoreStarted)
     return (): void => {
       PubSub.unsubscribe(token)
-      window.electron.ipcRenderer.removeAllListeners('mihomoMemory')
-      window.electron.ipcRenderer.removeAllListeners('core-started')
+      window.electron.ipcRenderer.removeListener('mihomoMemory', handleMemory)
+      window.electron.ipcRenderer.removeListener('core-started', handleCoreStarted)
+      if (memoryTimerRef.current) {
+        clearTimeout(memoryTimerRef.current)
+      }
+      memoryTimerRef.current = null
+      latestMemoryRef.current = null
     }
-  }, [])
+  }, [mutate])
 
   if (iconOnly) {
     return (

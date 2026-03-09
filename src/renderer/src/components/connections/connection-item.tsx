@@ -1,7 +1,7 @@
 import { Avatar, Button, Card, CardFooter, CardHeader, Chip } from '@heroui/react'
 import { calcTraffic } from '@renderer/utils/calc'
 import dayjs from 'dayjs'
-import React, { memo, useCallback, useEffect, useMemo, useState } from 'react'
+import React, { memo, useCallback, useMemo } from 'react'
 import { CgClose, CgTrash } from 'react-icons/cg'
 
 interface Props {
@@ -10,7 +10,7 @@ interface Props {
   displayIcon?: boolean
   iconUrl: string
   displayName?: string
-  selected: ControllerConnectionDetail | undefined
+  nowMinuteTick: number
   setSelected: React.Dispatch<React.SetStateAction<ControllerConnectionDetail | undefined>>
   setIsDetailModalOpen: React.Dispatch<React.SetStateAction<boolean>>
   close: (id: string) => void
@@ -22,6 +22,7 @@ const ConnectionItemComponent: React.FC<Props> = ({
   displayIcon,
   iconUrl,
   displayName,
+  nowMinuteTick,
   close,
   setSelected,
   setIsDetailModalOpen
@@ -46,15 +47,7 @@ const ConnectionItemComponent: React.FC<Props> = ({
     ]
   )
 
-  const [timeAgo, setTimeAgo] = useState(() => dayjs(info.start).fromNow())
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setTimeAgo(dayjs(info.start).fromNow())
-    }, 60000)
-
-    return () => clearInterval(timer)
-  }, [info.start])
+  const timeAgo = useMemo(() => dayjs(info.start).fromNow(), [info.start, nowMinuteTick])
 
   const uploadTraffic = useMemo(() => calcTraffic(info.upload), [info.upload])
 
@@ -165,7 +158,7 @@ const ConnectionItem = memo(ConnectionItemComponent, (prevProps, nextProps) => {
     prevProps.iconUrl === nextProps.iconUrl &&
     prevProps.displayIcon === nextProps.displayIcon &&
     prevProps.displayName === nextProps.displayName &&
-    prevProps.selected?.id === nextProps.selected?.id
+    prevProps.nowMinuteTick === nextProps.nowMinuteTick
   )
 })
 
