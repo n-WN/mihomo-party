@@ -1,17 +1,20 @@
 import BasePage from '@renderer/components/base/base-page'
 import LogItem from '@renderer/components/logs/log-item'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Button, Divider, Input } from '@heroui/react'
-import { Virtuoso, VirtuosoHandle } from 'react-virtuoso'
+import { Virtuoso } from 'react-virtuoso'
 import { IoLocationSharp } from 'react-icons/io5'
 import { CgTrash } from 'react-icons/cg'
 
 import { includesIgnoreCase } from '@renderer/utils/includes'
 
+const MAX_LOGS = 500
+
 const cachedLogs: {
   log: ControllerLog[]
   trigger: ((i: ControllerLog[]) => void) | null
   clean: () => void
+  append: (items: ControllerLog[]) => void
 } = {
   log: [],
   trigger: null,
@@ -20,18 +23,22 @@ const cachedLogs: {
     if (this.trigger !== null) {
       this.trigger(this.log)
     }
+  },
+  append(items: ControllerLog[]): void {
+    if (items.length === 0) return
+    const nextItems = items.map((item) => ({
+      ...item,
+      time: new Date().toLocaleString()
+    }))
+    this.log = [...this.log, ...nextItems].slice(-MAX_LOGS)
+    if (this.trigger !== null) {
+      this.trigger(this.log)
+    }
   }
 }
 
-window.electron.ipcRenderer.on('mihomoLogs', (_e, log: ControllerLog) => {
-  log.time = new Date().toLocaleString()
-  cachedLogs.log.push(log)
-  if (cachedLogs.log.length >= 500) {
-    cachedLogs.log.shift()
-  }
-  if (cachedLogs.trigger !== null) {
-    cachedLogs.trigger(cachedLogs.log)
-  }
+window.electron.ipcRenderer.on('mihomoLogs', (_e, logs: ControllerLog[]) => {
+  cachedLogs.append(logs)
 })
 
 const Logs: React.FC = () => {
@@ -39,7 +46,6 @@ const Logs: React.FC = () => {
   const [filter, setFilter] = useState('')
   const [trace, setTrace] = useState(true)
 
-  const virtuosoRef = useRef<VirtuosoHandle>(null)
   const filteredLogs = useMemo(() => {
     if (filter === '') return logs
     return logs.filter((log) => {
@@ -48,19 +54,9 @@ const Logs: React.FC = () => {
   }, [logs, filter])
 
   useEffect(() => {
-    if (!trace) return
-    virtuosoRef.current?.scrollToIndex({
-      index: filteredLogs.length - 1,
-      behavior: 'smooth',
-      align: 'end',
-      offset: 0
-    })
-  }, [filteredLogs, trace])
-
-  useEffect(() => {
     const old = cachedLogs.trigger
-    cachedLogs.trigger = (a): void => {
-      setLogs([...a])
+    cachedLogs.trigger = (items): void => {
+      setLogs([...items])
     }
     return (): void => {
       cachedLogs.trigger = old
@@ -108,7 +104,6 @@ const Logs: React.FC = () => {
       </div>
       <div className="h-[calc(100vh-100px)] mt-px">
         <Virtuoso
-          ref={virtuosoRef}
           data={filteredLogs}
           initialTopMostItemIndex={filteredLogs.length - 1}
           followOutput={trace}

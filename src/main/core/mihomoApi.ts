@@ -21,11 +21,15 @@ let memoryFlushTimer: NodeJS.Timeout | null = null
 let lastMemoryPushAt = 0
 let mihomoLogsWs: WebSocket | null = null
 let logsRetry = 10
+let latestLogs: ControllerLog[] = []
+let logsFlushTimer: NodeJS.Timeout | null = null
 let mihomoConnectionsWs: WebSocket | null = null
 let connectionsRetry = 10
 
 const TRAFFIC_PUSH_INTERVAL = 250
 const MEMORY_PUSH_INTERVAL = 1000
+const LOGS_PUSH_INTERVAL = 200
+const MAX_LOGS_BATCH_SIZE = 50
 
 export const getAxios = async (force: boolean = false): Promise<AxiosInstance> => {
   const currentSocketPath = mihomoIpcPath()
@@ -383,7 +387,43 @@ export const startMihomoLogs = async (): Promise<void> => {
   await mihomoLogs()
 }
 
+const dispatchLogs = (logs: ControllerLog[]): void => {
+  if (logs.length === 0) return
+  try {
+    mainWindow?.webContents.send('mihomoLogs', logs)
+  } catch {
+    // ignore
+  }
+}
+
+const flushLogs = (): void => {
+  logsFlushTimer = null
+  if (latestLogs.length === 0) return
+  const nextLogs = latestLogs
+  latestLogs = []
+  dispatchLogs(nextLogs)
+}
+
+const scheduleLogsDispatch = (log: ControllerLog): void => {
+  latestLogs.push(log)
+  if (latestLogs.length >= MAX_LOGS_BATCH_SIZE) {
+    if (logsFlushTimer) {
+      clearTimeout(logsFlushTimer)
+      logsFlushTimer = null
+    }
+    flushLogs()
+    return
+  }
+  if (logsFlushTimer) return
+  logsFlushTimer = setTimeout(flushLogs, LOGS_PUSH_INTERVAL)
+}
+
 export const stopMihomoLogs = (): void => {
+  if (logsFlushTimer) {
+    clearTimeout(logsFlushTimer)
+    logsFlushTimer = null
+  }
+  latestLogs = []
   if (mihomoLogsWs) {
     mihomoLogsWs.removeAllListeners()
     if (mihomoLogsWs.readyState === WebSocket.OPEN) {
@@ -402,7 +442,7 @@ const mihomoLogs = async (): Promise<void> => {
     const data = e.data as string
     logsRetry = 10
     try {
-      mainWindow?.webContents.send('mihomoLogs', JSON.parse(data) as ControllerLog)
+      scheduleLogsDispatch(JSON.parse(data) as ControllerLog)
     } catch {
       // ignore
     }

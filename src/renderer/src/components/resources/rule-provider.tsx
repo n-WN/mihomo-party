@@ -51,11 +51,13 @@ const RuleProvider: React.FC = () => {
   })
 
   useEffect(() => {
-    window.electron.ipcRenderer.on('core-started', () => {
+    const handleCoreStarted = (): void => {
       mutate()
-    })
+    }
+
+    window.electron.ipcRenderer.on('core-started', handleCoreStarted)
     return (): void => {
-      window.electron.ipcRenderer.removeAllListeners('core-started')
+      window.electron.ipcRenderer.removeListener('core-started', handleCoreStarted)
     }
   }, [])
 
@@ -68,22 +70,38 @@ const RuleProvider: React.FC = () => {
   }, [data])
   const [updating, setUpdating] = useState(Array(providers.length).fill(false))
 
-  const onUpdate = async (name: string, index: number): Promise<void> => {
+  const onUpdate = async (
+    name: string,
+    index: number,
+    shouldMutate: boolean = true
+  ): Promise<void> => {
     setUpdating((prev) => {
-      prev[index] = true
-      return [...prev]
+      const next = [...prev]
+      next[index] = true
+      return next
     })
     try {
       await mihomoUpdateRuleProviders(name)
-      mutate()
+      if (shouldMutate) {
+        mutate()
+      }
     } catch (e) {
-      new Notification(`${name} 更新失败\n${e}`)
+      new Notification(`${name} 更新失败
+${e}`)
     } finally {
       setUpdating((prev) => {
-        prev[index] = false
-        return [...prev]
+        const next = [...prev]
+        next[index] = false
+        return next
       })
     }
+  }
+
+  const onUpdateAll = async (): Promise<void> => {
+    await Promise.allSettled(
+      providers.map((provider, index) => onUpdate(provider.name, index, false))
+    )
+    mutate()
   }
 
   if (!providers.length) {
@@ -116,9 +134,7 @@ const RuleProvider: React.FC = () => {
           size="sm"
           color="primary"
           onPress={() => {
-            providers.forEach((provider, index) => {
-              onUpdate(provider.name, index)
-            })
+            onUpdateAll()
           }}
         >
           更新全部

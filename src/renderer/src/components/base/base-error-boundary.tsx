@@ -2,7 +2,28 @@ import { Button } from '@heroui/react'
 import { JSX, ReactNode } from 'react'
 import { ErrorBoundary, FallbackProps } from 'react-error-boundary'
 
+const normalizeError = (error: unknown): { message: string; stack?: string } => {
+  if (error instanceof Error) {
+    return {
+      message: error.message,
+      stack: error.stack
+    }
+  }
+
+  if (typeof error === 'string') {
+    return {
+      message: error
+    }
+  }
+
+  return {
+    message: 'Unknown error'
+  }
+}
+
 const ErrorFallback = ({ error }: FallbackProps): JSX.Element => {
+  const { message, stack } = normalizeError(error)
+
   return (
     <div className="p-4">
       <h2 className="my-2 text-lg font-bold">
@@ -31,18 +52,16 @@ const ErrorFallback = ({ error }: FallbackProps): JSX.Element => {
         size="sm"
         variant="flat"
         className="ml-2"
-        onPress={() =>
-          navigator.clipboard.writeText('```\n' + error.message + '\n' + error.stack + '\n```')
-        }
+        onPress={() => navigator.clipboard.writeText(`\`\`\`\n${message}\n${stack || ''}\n\`\`\``)}
       >
         复制报错信息
       </Button>
 
-      <p className="my-2">{error.message}</p>
+      <p className="my-2">{message}</p>
 
       <details title="Error Stack">
         <summary>Error Stack</summary>
-        <pre>{error.stack}</pre>
+        <pre>{stack || 'No stack trace available'}</pre>
       </details>
     </div>
   )

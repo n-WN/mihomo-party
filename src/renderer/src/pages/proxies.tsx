@@ -19,6 +19,14 @@ import CollapseInput from '@renderer/components/base/collapse-input'
 import { includesIgnoreCase } from '@renderer/utils/includes'
 import { useControledMihomoConfig } from '@renderer/hooks/use-controled-mihomo-config'
 
+const resizeStateArray = <T,>(prev: T[], length: number, fallback: T): T[] => {
+  const next = prev.slice(0, length)
+  while (next.length < length) {
+    next.push(fallback)
+  }
+  return next
+}
+
 const Proxies: React.FC = () => {
   const { controledMihomoConfig } = useControledMihomoConfig()
   const { mode = 'rule' } = controledMihomoConfig || {}
@@ -40,11 +48,13 @@ const Proxies: React.FC = () => {
   const [delaying, setDelaying] = useState(Array(groups.length).fill(false))
   const [searchValue, setSearchValue] = useState(Array(groups.length).fill(''))
   const [isSettingModalOpen, setIsSettingModalOpen] = useState(false)
+  const [groupIconMap, setGroupIconMap] = useState<Record<string, string>>({})
   const virtuosoRef = useRef<GroupedVirtuosoHandle>(null)
+  const groupIconLoading = useRef(new Set<string>())
+  const resizeFrameRef = useRef<number | null>(null)
   const { groupCounts, allProxies } = useMemo(() => {
     const groupCounts: number[] = []
     const allProxies: (ControllerProxiesDetail | ControllerGroupDetail)[][] = []
-    if (groups.length !== searchValue.length) setSearchValue(Array(groups.length).fill(''))
     groups.forEach((group, index) => {
       if (isOpen[index]) {
         let groupProxies = group.all.filter(
@@ -72,6 +82,49 @@ const Proxies: React.FC = () => {
     })
     return { groupCounts, allProxies }
   }, [groups, isOpen, proxyDisplayOrder, cols, searchValue])
+
+  useEffect(() => {
+    setIsOpen((prev) => resizeStateArray(prev, groups.length, false))
+    setDelaying((prev) => resizeStateArray(prev, groups.length, false))
+    setSearchValue((prev) => resizeStateArray(prev, groups.length, ''))
+  }, [groups.length])
+
+  useEffect(() => {
+    let cancelled = false
+    const remoteIcons = groups
+      .map((group) => group.icon)
+      .filter((icon): icon is string => Boolean(icon && icon.startsWith('http')))
+
+    const loadIcons = async (): Promise<void> => {
+      for (const icon of remoteIcons) {
+        if (cancelled || groupIconLoading.current.has(icon) || groupIconMap[icon]) continue
+
+        const cached = localStorage.getItem(icon)
+        if (cached) {
+          setGroupIconMap((prev) => (prev[icon] === cached ? prev : { ...prev, [icon]: cached }))
+          continue
+        }
+
+        groupIconLoading.current.add(icon)
+        try {
+          const dataURL = await getImageDataURL(icon)
+          if (cancelled || !dataURL) continue
+          localStorage.setItem(icon, dataURL)
+          setGroupIconMap((prev) => (prev[icon] === dataURL ? prev : { ...prev, [icon]: dataURL }))
+        } catch {
+          // ignore
+        } finally {
+          groupIconLoading.current.delete(icon)
+        }
+      }
+    }
+
+    void loadIcons()
+
+    return (): void => {
+      cancelled = true
+    }
+  }, [groupIconMap, groups])
 
   const onChangeProxy = useCallback(
     async (group: string, proxy: string): Promise<void> => {
@@ -105,47 +158,61 @@ const Proxies: React.FC = () => {
 
   const onGroupDelay = useCallback(
     async (index: number): Promise<void> => {
-      if (allProxies[index].length === 0) {
+      const targetGroup = groups[index]
+      if (!targetGroup) return
+
+      const fallbackProxies = targetGroup.all.filter(
+        (proxy) => proxy && includesIgnoreCase(proxy.name, searchValue[index] || '')
+      )
+      const targetProxies = allProxies[index].length > 0 ? allProxies[index] : fallbackProxies
+
+      if (!isOpen[index]) {
         setIsOpen((prev) => {
           const newOpen = [...prev]
           newOpen[index] = true
           return newOpen
         })
       }
+
       setDelaying((prev) => {
         const newDelaying = [...prev]
         newDelaying[index] = true
         return newDelaying
       })
-      const result: Promise<void>[] = []
-      const runningList: Promise<void>[] = []
-      for (const proxy of allProxies[index]) {
-        const promise = Promise.resolve().then(async () => {
-          try {
-            await mihomoProxyDelay(proxy.name, getDelayTestUrl(groups[index]))
-          } catch {
-            // ignore
-          } finally {
-            mutate()
+
+      try {
+        const result: Promise<void>[] = []
+        const runningList: Promise<void>[] = []
+
+        for (const proxy of targetProxies) {
+          const promise = Promise.resolve().then(async () => {
+            try {
+              await mihomoProxyDelay(proxy.name, getDelayTestUrl(targetGroup))
+            } catch {
+              // ignore
+            }
+          })
+          result.push(promise)
+          const running = promise.then(() => {
+            runningList.splice(runningList.indexOf(running), 1)
+          })
+          runningList.push(running)
+          if (runningList.length >= (delayTestConcurrency || 50)) {
+            await Promise.race(runningList)
           }
-        })
-        result.push(promise)
-        const running = promise.then(() => {
-          runningList.splice(runningList.indexOf(running), 1)
-        })
-        runningList.push(running)
-        if (runningList.length >= (delayTestConcurrency || 50)) {
-          await Promise.race(runningList)
         }
+
+        await Promise.all(result)
+        mutate()
+      } finally {
+        setDelaying((prev) => {
+          const newDelaying = [...prev]
+          newDelaying[index] = false
+          return newDelaying
+        })
       }
-      await Promise.all(result)
-      setDelaying((prev) => {
-        const newDelaying = [...prev]
-        newDelaying[index] = false
-        return newDelaying
-      })
     },
-    [allProxies, groups, delayTestConcurrency, mutate, getDelayTestUrl]
+    [allProxies, delayTestConcurrency, getDelayTestUrl, groups, isOpen, mutate, searchValue]
   )
 
   const calcCols = useCallback((): number => {
@@ -205,29 +272,31 @@ const Proxies: React.FC = () => {
       setCols(parseInt(proxyCols))
       return
     }
+
     setCols(calcCols())
     const handleResize = (): void => {
-      setCols(calcCols())
+      if (resizeFrameRef.current !== null) return
+      resizeFrameRef.current = window.requestAnimationFrame(() => {
+        resizeFrameRef.current = null
+        setCols((prev) => {
+          const next = calcCols()
+          return prev === next ? prev : next
+        })
+      })
     }
+
     window.addEventListener('resize', handleResize)
     return (): void => {
       window.removeEventListener('resize', handleResize)
+      if (resizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(resizeFrameRef.current)
+        resizeFrameRef.current = null
+      }
     }
   }, [proxyCols, calcCols])
 
   const groupContent = useCallback(
     (index: number) => {
-      if (
-        groups[index] &&
-        groups[index].icon &&
-        groups[index].icon.startsWith('http') &&
-        !localStorage.getItem(groups[index].icon)
-      ) {
-        getImageDataURL(groups[index].icon).then((dataURL) => {
-          localStorage.setItem(groups[index].icon, dataURL)
-          mutate()
-        })
-      }
       return groups[index] ? (
         <div
           className={`w-full pt-2 ${index === groupCounts.length - 1 && !isOpen[index] ? 'pb-2' : ''} px-2`}
@@ -244,7 +313,7 @@ const Proxies: React.FC = () => {
                       src={
                         groups[index].icon.startsWith('<svg')
                           ? `data:image/svg+xml;utf8,${groups[index].icon}`
-                          : localStorage.getItem(groups[index].icon) || groups[index].icon
+                          : groupIconMap[groups[index].icon] || groups[index].icon
                       }
                     />
                   ) : null}
@@ -330,7 +399,7 @@ const Proxies: React.FC = () => {
       updateSearchValue,
       scrollToCurrentProxy,
       onGroupDelay,
-      mutate
+      groupIconMap
     ]
   )
 

@@ -1,6 +1,6 @@
 import { Button, Card, CardBody } from '@heroui/react'
 import { mihomoUnfixedProxy } from '@renderer/utils/ipc'
-import React, { useMemo, useState } from 'react'
+import React, { useCallback, useState } from 'react'
 import { FaMapPin } from 'react-icons/fa6'
 
 interface Props {
@@ -13,38 +13,45 @@ interface Props {
   selected: boolean
 }
 
-const ProxyItem: React.FC<Props> = (props) => {
+const getProxyDelayValue = (proxy: ControllerProxiesDetail | ControllerGroupDetail): number => {
+  if (proxy.history.length > 0) {
+    return proxy.history[proxy.history.length - 1].delay
+  }
+  return -1
+}
+
+const ProxyItemComponent: React.FC<Props> = (props) => {
   const { mutateProxies, proxyDisplayLayout, group, proxy, selected, onSelect, onProxyDelay } =
     props
 
-  const delay = useMemo(() => {
-    if (proxy.history.length > 0) {
-      return proxy.history[proxy.history.length - 1].delay
-    }
-    return -1
-  }, [proxy])
-
+  const delay = getProxyDelayValue(proxy)
   const [loading, setLoading] = useState(false)
-  function delayColor(delay: number): 'primary' | 'success' | 'warning' | 'danger' {
-    if (delay === -1) return 'primary'
-    if (delay === 0) return 'danger'
-    if (delay < 500) return 'success'
+
+  const delayColor = (nextDelay: number): 'primary' | 'success' | 'warning' | 'danger' => {
+    if (nextDelay === -1) return 'primary'
+    if (nextDelay === 0) return 'danger'
+    if (nextDelay < 500) return 'success'
     return 'warning'
   }
 
-  function delayText(delay: number): string {
-    if (delay === -1) return '测试'
-    if (delay === 0) return '超时'
-    return delay.toString()
+  const delayText = (nextDelay: number): string => {
+    if (nextDelay === -1) return '测试'
+    if (nextDelay === 0) return '超时'
+    return nextDelay.toString()
   }
 
-  const onDelay = (): void => {
+  const handleDelay = useCallback((): void => {
     setLoading(true)
     onProxyDelay(proxy.name, group).finally(() => {
       mutateProxies()
       setLoading(false)
     })
-  }
+  }, [group, mutateProxies, onProxyDelay, proxy.name])
+
+  const handleUnfix = useCallback(async (): Promise<void> => {
+    await mihomoUnfixedProxy(group.name)
+    mutateProxies()
+  }, [group.name, mutateProxies])
 
   const fixed = group.fixed && group.fixed === proxy.name
 
@@ -80,10 +87,7 @@ const ProxyItem: React.FC<Props> = (props) => {
                     isIconOnly
                     title="取消固定"
                     color="danger"
-                    onPress={async () => {
-                      await mihomoUnfixedProxy(group.name)
-                      mutateProxies()
-                    }}
+                    onPress={handleUnfix}
                     variant="light"
                     className="h-[24px] w-[24px] min-w-[24px] p-0 text-xs"
                   >
@@ -95,7 +99,7 @@ const ProxyItem: React.FC<Props> = (props) => {
                   title={proxy.type}
                   isLoading={loading}
                   color={delayColor(delay)}
-                  onPress={onDelay}
+                  onPress={handleDelay}
                   variant="light"
                   className="h-[32px] w-[32px] min-w-[32px] p-0 text-xs"
                 >
@@ -122,10 +126,7 @@ const ProxyItem: React.FC<Props> = (props) => {
                       isIconOnly
                       title="取消固定"
                       color="danger"
-                      onPress={async () => {
-                        await mihomoUnfixedProxy(group.name)
-                        mutateProxies()
-                      }}
+                      onPress={handleUnfix}
                       variant="light"
                       className="h-[24px] w-[24px] min-w-[24px] p-0 text-xs"
                     >
@@ -139,7 +140,7 @@ const ProxyItem: React.FC<Props> = (props) => {
                     title={proxy.type}
                     isLoading={loading}
                     color={delayColor(delay)}
-                    onPress={onDelay}
+                    onPress={handleDelay}
                     variant="light"
                     className="h-full w-[32px] min-w-[32px] p-0 text-sm"
                   >
@@ -154,5 +155,18 @@ const ProxyItem: React.FC<Props> = (props) => {
     </Card>
   )
 }
+
+const ProxyItem = React.memo(ProxyItemComponent, (prevProps, nextProps) => {
+  return (
+    prevProps.selected === nextProps.selected &&
+    prevProps.proxyDisplayLayout === nextProps.proxyDisplayLayout &&
+    prevProps.proxy.name === nextProps.proxy.name &&
+    prevProps.proxy.type === nextProps.proxy.type &&
+    getProxyDelayValue(prevProps.proxy) === getProxyDelayValue(nextProps.proxy) &&
+    prevProps.group.name === nextProps.group.name &&
+    prevProps.group.now === nextProps.group.now &&
+    prevProps.group.fixed === nextProps.group.fixed
+  )
+})
 
 export default ProxyItem
