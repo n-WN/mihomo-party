@@ -32,7 +32,8 @@ const Proxies: React.FC = () => {
     closeMode = 'all',
     proxyCols = 'auto',
     delayTestUrlScope = 'group',
-    delayTestConcurrency = 50
+    delayTestConcurrency = 50,
+    disableAnimation = true
   } = appConfig || {}
   const [cols, setCols] = useState(1)
   const [isOpen, setIsOpen] = useState(Array(groups.length).fill(false))
@@ -307,7 +308,7 @@ const Proxies: React.FC = () => {
                     </Button>
                   </div>
                   <IoIosArrowBack
-                    className={`transition duration-200 ml-2 h-[32px] text-lg text-foreground-500 flex items-center ${isOpen[index] ? '-rotate-90' : ''}`}
+                    className={`${disableAnimation ? '' : 'transition duration-150'} ml-2 h-[32px] text-lg text-foreground-500 flex items-center ${isOpen[index] ? '-rotate-90' : ''}`}
                   />
                 </div>
               </div>

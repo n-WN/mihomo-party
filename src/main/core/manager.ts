@@ -117,6 +117,13 @@ function getStartupFailureMessage(str: string): string | undefined {
   return undefined
 }
 
+function stopMihomoStreams(): void {
+  stopMihomoTraffic()
+  stopMihomoConnections()
+  stopMihomoLogs()
+  stopMihomoMemory()
+}
+
 async function startCoreInternal(detached = false): Promise<Promise<void>[]> {
   const {
     core = 'mihomo',
@@ -220,6 +227,7 @@ async function startCoreInternal(detached = false): Promise<Promise<void>[]> {
     child = undefined
 
     if (!initialized) {
+      stopMihomoStreams()
       return
     }
 
@@ -273,6 +281,7 @@ async function startCoreInternal(detached = false): Promise<Promise<void>[]> {
       if (isCurrentChild()) {
         child = undefined
       }
+      stopMihomoStreams()
       await stopChildProcess(spawnedChild).catch(() => {})
       reject(message)
     }
@@ -351,13 +360,14 @@ async function startCoreInternal(detached = false): Promise<Promise<void>[]> {
           await finishStartup()
           void queueCoreLifecycle(async () => {
             await stopCoreInternal(true)
-            const promises = await startCoreInternal()
-            await Promise.all(promises)
-          }).catch(async (error) => {
-            await writeFile(logPath(), `[Manager]: restart after updater failed, ${error}\n`, {
-              flag: 'a'
-            })
+            return startCoreInternal()
           })
+            .then((promises) => Promise.all(promises))
+            .catch(async (error) => {
+              await writeFile(logPath(), `[Manager]: restart after updater failed, ${error}\n`, {
+                flag: 'a'
+              })
+            })
           return
         }
 
@@ -402,14 +412,9 @@ async function startCoreInternal(detached = false): Promise<Promise<void>[]> {
 }
 
 export async function startCore(detached = false): Promise<Promise<void>[]> {
-  return queueCoreLifecycle(async () => {
-    const promises = await startCoreInternal(detached)
-    if (!detached) {
-      await Promise.all(promises)
-    }
-    return promises
-  })
+  return queueCoreLifecycle(() => startCoreInternal(detached))
 }
+
 async function stopCoreInternal(force = false): Promise<void> {
   try {
     if (!force) {
@@ -421,10 +426,7 @@ async function stopCoreInternal(force = false): Promise<void> {
     })
   }
 
-  stopMihomoTraffic()
-  stopMihomoConnections()
-  stopMihomoLogs()
-  stopMihomoMemory()
+  stopMihomoStreams()
 
   const currentChild = child
   if (currentChild && !currentChild.killed) {
@@ -534,15 +536,15 @@ async function stopChildProcess(process: ChildProcess): Promise<void> {
 }
 
 export async function restartCore(): Promise<void> {
-  await queueCoreLifecycle(async () => {
-    try {
+  try {
+    const promises = await queueCoreLifecycle(async () => {
       await stopCoreInternal()
-      const promises = await startCoreInternal()
-      await Promise.all(promises)
-    } catch (e) {
-      dialog.showErrorBox('内核启动出错', `${e}`)
-    }
-  })
+      return startCoreInternal()
+    })
+    await Promise.all(promises)
+  } catch (e) {
+    dialog.showErrorBox('内核启动出错', `${e}`)
+  }
 }
 
 export async function keepCoreAlive(): Promise<void> {

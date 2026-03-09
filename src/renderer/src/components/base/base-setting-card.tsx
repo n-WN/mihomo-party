@@ -1,5 +1,6 @@
 import React from 'react'
 import { Accordion, AccordionItem, Card, CardBody } from '@heroui/react'
+import { useAppConfig } from '@renderer/hooks/use-app-config'
 
 interface Props {
   title?: string
@@ -8,6 +9,9 @@ interface Props {
 }
 
 const SettingCard: React.FC<Props> = (props) => {
+  const { appConfig } = useAppConfig()
+  const { disableAnimation = true } = appConfig || {}
+
   return !props.title ? (
     <Card className={`${props.className} m-2`}>
       <CardBody>{props.children}</CardBody>
@@ -20,7 +24,7 @@ const SettingCard: React.FC<Props> = (props) => {
         title={props.title}
         indicator={({ isOpen }) => (
           <svg
-            className={`transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`}
+            className={`${disableAnimation ? '' : 'transition-transform duration-150'} ${isOpen ? 'rotate-180' : ''}`}
             width="16"
             height="16"
             viewBox="0 0 16 16"

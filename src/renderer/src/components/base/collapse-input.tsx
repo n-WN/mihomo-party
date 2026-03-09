@@ -1,6 +1,7 @@
 import React, { useRef } from 'react'
 import { Input, InputProps } from '@heroui/react'
 import { FaSearch } from 'react-icons/fa'
+import { useAppConfig } from '@renderer/hooks/use-app-config'
 
 interface CollapseInputProps extends InputProps {
   title: string
@@ -8,6 +9,8 @@ interface CollapseInputProps extends InputProps {
 
 const CollapseInput: React.FC<CollapseInputProps> = (props) => {
   const { title, ...inputProps } = props
+  const { appConfig } = useAppConfig()
+  const { disableAnimation = true } = appConfig || {}
   const inputRef = useRef<HTMLInputElement>(null)
 
   return (
@@ -19,7 +22,7 @@ const CollapseInput: React.FC<CollapseInputProps> = (props) => {
         style={{ paddingInlineEnd: 0 }}
         classNames={{
           inputWrapper: 'cursor-pointer bg-transparent p-0 data-[hover=true]:bg-content2',
-          input: 'w-0 focus:w-[150px] focus:ml-2 transition-all duration-200'
+          input: `w-0 focus:w-[150px] focus:ml-2 ${disableAnimation ? '' : 'transition-all duration-150'}`
         }}
         endContent={
           <div

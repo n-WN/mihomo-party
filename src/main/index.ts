@@ -295,9 +295,8 @@ app.whenReady().then(async () => {
   const coreStartPromise = (async (): Promise<void> => {
     try {
       const [startPromise] = await startCore()
-      startPromise.then(async () => {
-        await initProfileUpdater()
-      })
+      await startPromise
+      await initProfileUpdater()
       coreStarted = true
     } catch (e) {
       dialog.showErrorBox('内核启动出错', `${e}`)

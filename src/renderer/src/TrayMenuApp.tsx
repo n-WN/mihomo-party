@@ -14,7 +14,7 @@ interface TrafficData {
 const TrayMenuApp: React.FC = () => {
   const { groups, mutate } = useGroups()
   const { appConfig } = useAppConfig()
-  const { autoCloseConnection } = appConfig || {}
+  const { autoCloseConnection, disableAnimation = true } = appConfig || {}
 
   const [traffic, setTraffic] = useState<TrafficData>({ up: 0, down: 0 })
   const [testingGroup, setTestingGroup] = useState<string | null>(null)
@@ -199,7 +199,7 @@ const TrayMenuApp: React.FC = () => {
                         onClick={() => handleSelectProxy(group.name, proxy.name)}
                         className={`
                           flex items-center justify-between px-2 py-1.5 rounded-lg cursor-pointer
-                          transition-colors duration-150
+                          ${disableAnimation ? '' : 'transition-colors duration-150'}
                           ${isActive ? 'bg-primary/15 border border-primary/30' : 'hover:bg-default-100'}
                         `}
                       >

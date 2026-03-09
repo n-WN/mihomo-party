@@ -8,7 +8,7 @@ import { useControledMihomoConfig } from './hooks/use-controled-mihomo-config'
 const FloatingApp: React.FC = () => {
   const { appConfig } = useAppConfig()
   const { controledMihomoConfig } = useControledMihomoConfig()
-  const { sysProxy, spinFloatingIcon = true } = appConfig || {}
+  const { sysProxy, spinFloatingIcon = true, disableAnimation = true } = appConfig || {}
   const { tun } = controledMihomoConfig || {}
   const sysProxyEnabled = sysProxy?.enable
   const tunEnabled = tun?.enable
@@ -29,7 +29,7 @@ const FloatingApp: React.FC = () => {
   const [rotation, setRotation] = useState(0)
 
   useEffect(() => {
-    if (!spinFloatingIcon) return
+    if (!spinFloatingIcon || disableAnimation) return
 
     let animationFrameId: number
     const animate = (): void => {
@@ -46,7 +46,7 @@ const FloatingApp: React.FC = () => {
     return (): void => {
       cancelAnimationFrame(animationFrameId)
     }
-  }, [spinSpeed, spinFloatingIcon])
+  }, [disableAnimation, spinSpeed, spinFloatingIcon])
 
   useEffect(() => {
     window.electron.ipcRenderer.on('mihomoTraffic', async (_e, info: ControllerTraffic) => {
@@ -71,10 +71,10 @@ const FloatingApp: React.FC = () => {
               triggerMainWindow()
             }}
             style={
-              spinFloatingIcon
+              spinFloatingIcon && !disableAnimation
                 ? {
                     transform: `rotate(${rotation}deg)`,
-                    transition: 'transform 0.1s linear'
+                    transition: 'transform 0.15s linear'
                   }
                 : {}
             }
