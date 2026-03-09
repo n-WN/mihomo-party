@@ -70,10 +70,54 @@ let recoverDNSTimer: NodeJS.Timeout | null = null
 let networkDetectionTimer: NodeJS.Timeout | null = null
 let networkDownHandled = false
 
-let child: ChildProcess
+let child: ChildProcess | undefined
 let retry = 10
+let lifecycleQueue: Promise<void> = Promise.resolve()
+let childGeneration = 0
 
-export async function startCore(detached = false): Promise<Promise<void>[]> {
+function queueCoreLifecycle<T>(task: () => Promise<T>): Promise<T> {
+  const run = lifecycleQueue.then(task, task)
+  lifecycleQueue = run.then(
+    () => undefined,
+    () => undefined
+  )
+  return run
+}
+
+function getStartupFailureMessage(str: string): string | undefined {
+  if (
+    (process.platform !== 'win32' && str.includes('External controller unix listen error')) ||
+    (process.platform === 'win32' && str.includes('External controller pipe listen error'))
+  ) {
+    return `控制器监听错误:\n${str}`
+  }
+
+  const startupErrorPrefixes = [
+    'Start Mixed(http+socks) server error:',
+    'Start HTTP server error:',
+    'Start SOCKS server error:',
+    'Start DNS server(UDP) error:',
+    'Start DNS server(TCP) error:',
+    'Start DNS server error:',
+    'Start TUN listening error:'
+  ]
+
+  const lines = str
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+  const matchedLine = lines.find((line) =>
+    startupErrorPrefixes.some((prefix) => line.includes(prefix))
+  )
+
+  if (matchedLine) {
+    return `内核启动失败:\n${matchedLine}`
+  }
+
+  return undefined
+}
+
+async function startCoreInternal(detached = false): Promise<Promise<void>[]> {
   const {
     core = 'mihomo',
     autoSetDNSMode = 'exec',
@@ -95,14 +139,14 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
   } catch (error) {
     if (core === 'system') {
       await patchAppConfig({ core: 'mihomo' })
-      return startCore(detached)
+      return startCoreInternal(detached)
     }
     throw error
   }
 
   await generateProfile()
   await checkProfile()
-  await stopCore()
+  await stopCoreInternal()
   if (tun?.enable && autoSetDNSMode !== 'none') {
     try {
       await setPublicDNS()
@@ -134,8 +178,10 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
     SAFE_PATHS: safePaths.join(path.delimiter),
     PATH: process.env.PATH
   }
+
   let initialized = false
-  child = spawn(
+  let controllerReady = false
+  const spawnedChild = spawn(
     corePath,
     [
       '-d',
@@ -144,131 +190,227 @@ export async function startCore(detached = false): Promise<Promise<void>[]> {
       mihomoIpcPath()
     ],
     {
-      detached: detached,
+      detached,
       stdio: detached ? 'ignore' : undefined,
-      env: env
+      env
     }
   )
-  if (process.platform === 'win32' && child.pid) {
-    os.setPriority(child.pid, os.constants.priority[mihomoCpuPriority])
+  child = spawnedChild
+  const generation = ++childGeneration
+
+  if (process.platform === 'win32' && spawnedChild.pid) {
+    os.setPriority(spawnedChild.pid, os.constants.priority[mihomoCpuPriority])
   }
   if (detached) {
-    child.unref()
-    return new Promise((resolve) => {
-      resolve([new Promise(() => {})])
-    })
+    spawnedChild.unref()
+    return [new Promise(() => {})]
   }
-  child.on('close', async (code, signal) => {
+
+  const isCurrentChild = (): boolean => child === spawnedChild && childGeneration === generation
+
+  const runtimeCloseHandler = async (code: number | null, signal: NodeJS.Signals | null) => {
     await writeFile(logPath(), `[Manager]: Core closed, code: ${code}, signal: ${signal}\n`, {
       flag: 'a'
     })
+
+    if (!isCurrentChild()) {
+      return
+    }
+
+    child = undefined
+
+    if (!initialized) {
+      return
+    }
+
     if (retry) {
       await writeFile(logPath(), `[Manager]: Try Restart Core\n`, { flag: 'a' })
       retry--
-      await restartCore()
-    } else {
-      await stopCore()
+      void restartCore().catch(async (error) => {
+        await writeFile(logPath(), `[Manager]: restart core failed, ${error}\n`, {
+          flag: 'a'
+        })
+      })
+      return
     }
-  })
-  child.stdout?.pipe(stdout)
-  child.stderr?.pipe(stderr)
-  return new Promise((resolve, reject) => {
-    child.stdout?.on('data', async (data) => {
-      const str = data.toString()
-      if (
-        (process.platform !== 'win32' && str.includes('External controller unix listen error')) ||
-        (process.platform === 'win32' && str.includes('External controller pipe listen error'))
-      ) {
-        reject(`控制器监听错误:\n${str}`)
-      }
 
-      if (process.platform === 'win32' && str.includes('updater: finished')) {
+    void stopCore().catch(async (error) => {
+      await writeFile(logPath(), `[Manager]: stop core failed, ${error}\n`, {
+        flag: 'a'
+      })
+    })
+  }
+
+  spawnedChild.on('close', (code, signal) => {
+    void runtimeCloseHandler(code, signal)
+  })
+  spawnedChild.stdout?.pipe(stdout)
+  spawnedChild.stderr?.pipe(stderr)
+
+  const startPromise = new Promise<void>((resolve, reject) => {
+    let startupSettled = false
+
+    const cleanupStartupListeners = (): void => {
+      spawnedChild.stdout?.off('data', onStartupData)
+      spawnedChild.off('close', onStartupClose)
+    }
+
+    const finishStartup = async (): Promise<void> => {
+      if (startupSettled) {
+        return
+      }
+      startupSettled = true
+      cleanupStartupListeners()
+      resolve()
+    }
+
+    const failStartup = async (message: string): Promise<void> => {
+      if (startupSettled) {
+        return
+      }
+      startupSettled = true
+      cleanupStartupListeners()
+      if (isCurrentChild()) {
+        child = undefined
+      }
+      await stopChildProcess(spawnedChild).catch(() => {})
+      reject(message)
+    }
+
+    const waitForMihomoReady = async (): Promise<void> => {
+      const maxRetries = 30
+      const retryInterval = 100
+
+      for (let i = 0; i < maxRetries; i++) {
         try {
-          await stopCore(true)
-          const promises = await startCore()
-          await Promise.all(promises)
-        } catch (e) {
-          dialog.showErrorBox('内核启动出错', `${e}`)
+          await mihomoGroups()
+          break
+        } catch {
+          await new Promise((r) => setTimeout(r, retryInterval))
+        }
+      }
+    }
+
+    const handleProviderInitialization = async (logLine: string): Promise<void> => {
+      for (const match of logLine.matchAll(/Start initial provider ([^"]+)"/g)) {
+        const name = normalize(match[1])
+        if (providerNames.has(name)) {
+          unmatchedProviders.delete(name)
         }
       }
 
       if (
-        (process.platform !== 'win32' && str.includes('RESTful API unix listening at')) ||
-        (process.platform === 'win32' && str.includes('RESTful API pipe listening at'))
+        logLine.includes(
+          'Start TUN listening error: configure tun interface: Connect: operation not permitted'
+        )
       ) {
-        resolve([
-          new Promise((resolve, reject) => {
-            const handleProviderInitialization = async (logLine: string): Promise<void> => {
-              for (const match of logLine.matchAll(/Start initial provider ([^"]+)"/g)) {
-                const name = normalize(match[1])
-                if (providerNames.has(name)) {
-                  unmatchedProviders.delete(name)
-                }
-              }
+        patchControledMihomoConfig({ tun: { enable: false } })
+        mainWindow?.webContents.send('controledMihomoConfigUpdated')
+        ipcMain.emit('updateTrayMenu')
+        await failStartup('虚拟网卡启动失败，前往内核设置页尝试手动授予内核权限')
+        return
+      }
 
-              if (
-                logLine.includes(
-                  'Start TUN listening error: configure tun interface: Connect: operation not permitted'
-                )
-              ) {
-                patchControledMihomoConfig({ tun: { enable: false } })
-                mainWindow?.webContents.send('controledMihomoConfigUpdated')
-                ipcMain.emit('updateTrayMenu')
-                reject('虚拟网卡启动失败，前往内核设置页尝试手动授予内核权限')
-              }
+      const startupFailureMessage = getStartupFailureMessage(logLine)
+      if (startupFailureMessage) {
+        await failStartup(startupFailureMessage)
+        return
+      }
 
-              const isDefaultProvider = logLine.includes(
-                'Start initial compatible provider default'
-              )
-              const isAllProvidersMatched = providerNames.size > 0 && unmatchedProviders.size === 0
+      const isDefaultProvider = logLine.includes('Start initial compatible provider default')
+      const isAllProvidersMatched = providerNames.size > 0 && unmatchedProviders.size === 0
 
-              if ((providerNames.size === 0 && isDefaultProvider) || isAllProvidersMatched) {
-                const waitForMihomoReady = async (): Promise<void> => {
-                  const maxRetries = 30
-                  const retryInterval = 100
+      if ((providerNames.size === 0 && isDefaultProvider) || isAllProvidersMatched) {
+        await waitForMihomoReady()
+        initialized = true
+        await Promise.allSettled([
+          new Promise((r) => setTimeout(r, 100)).then(() => {
+            mainWindow?.webContents.send('groupsUpdated')
+            mainWindow?.webContents.send('rulesUpdated')
+          }),
+          uploadRuntimeConfig(),
+          new Promise((r) => setTimeout(r, 100)).then(() =>
+            patchMihomoConfig({ 'log-level': logLevel })
+          )
+        ])
+        await finishStartup()
+      }
+    }
 
-                  for (let i = 0; i < maxRetries; i++) {
-                    try {
-                      await mihomoGroups()
-                      break
-                    } catch (error) {
-                      await new Promise((r) => setTimeout(r, retryInterval))
-                    }
-                  }
-                }
+    const onStartupClose = (code: number | null, signal: NodeJS.Signals | null): void => {
+      if (!initialized) {
+        void failStartup(`内核在初始化完成前退出, code: ${code}, signal: ${signal}`)
+      }
+    }
 
-                await waitForMihomoReady()
-                initialized = true
-                Promise.all([
-                  new Promise((r) => setTimeout(r, 100)).then(() => {
-                    mainWindow?.webContents.send('groupsUpdated')
-                    mainWindow?.webContents.send('rulesUpdated')
-                  }),
-                  uploadRuntimeConfig(),
-                  new Promise((r) => setTimeout(r, 100)).then(() =>
-                    patchMihomoConfig({ 'log-level': logLevel })
-                  )
-                ]).then(() => resolve())
-              }
-            }
-            child.stdout?.on('data', (data) => {
-              if (!initialized) {
-                handleProviderInitialization(data.toString())
-              }
+    const onStartupData = (data: Buffer): void => {
+      void (async () => {
+        const str = data.toString()
+
+        if (process.platform === 'win32' && str.includes('updater: finished')) {
+          await finishStartup()
+          void queueCoreLifecycle(async () => {
+            await stopCoreInternal(true)
+            const promises = await startCoreInternal()
+            await Promise.all(promises)
+          }).catch(async (error) => {
+            await writeFile(logPath(), `[Manager]: restart after updater failed, ${error}\n`, {
+              flag: 'a'
             })
           })
-        ])
-        await startMihomoTraffic()
-        await startMihomoConnections()
-        await startMihomoLogs()
-        await startMihomoMemory()
-        retry = 10
-      }
-    })
+          return
+        }
+
+        const startupFailureMessage = getStartupFailureMessage(str)
+        if (
+          startupFailureMessage &&
+          !str.includes(
+            'Start TUN listening error: configure tun interface: Connect: operation not permitted'
+          )
+        ) {
+          await failStartup(startupFailureMessage)
+          return
+        }
+
+        if (
+          !controllerReady &&
+          ((process.platform !== 'win32' && str.includes('RESTful API unix listening at')) ||
+            (process.platform === 'win32' && str.includes('RESTful API pipe listening at')))
+        ) {
+          await startMihomoTraffic()
+          await startMihomoConnections()
+          await startMihomoLogs()
+          await startMihomoMemory()
+          retry = 10
+          controllerReady = true
+        }
+
+        if (!initialized) {
+          await handleProviderInitialization(str)
+        }
+      })().catch(async (error) => {
+        const message = error instanceof Error ? error.message : `${error}`
+        await failStartup(message)
+      })
+    }
+
+    spawnedChild.stdout?.on('data', onStartupData)
+    spawnedChild.on('close', onStartupClose)
   })
+
+  return [startPromise]
 }
 
-export async function stopCore(force = false): Promise<void> {
+export async function startCore(detached = false): Promise<Promise<void>[]> {
+  return queueCoreLifecycle(async () => {
+    const promises = await startCoreInternal(detached)
+    if (!detached) {
+      await Promise.all(promises)
+    }
+    return promises
+  })
+}
+async function stopCoreInternal(force = false): Promise<void> {
   try {
     if (!force) {
       await recoverDNS()
@@ -284,9 +426,12 @@ export async function stopCore(force = false): Promise<void> {
   stopMihomoLogs()
   stopMihomoMemory()
 
-  if (child && !child.killed) {
-    await stopChildProcess(child)
-    child = undefined as unknown as ChildProcess
+  const currentChild = child
+  if (currentChild && !currentChild.killed) {
+    await stopChildProcess(currentChild)
+  }
+  if (child === currentChild) {
+    child = undefined
   }
 
   await getAxios(true).catch(() => {})
@@ -311,6 +456,10 @@ export async function stopCore(force = false): Promise<void> {
     }
     await rm(path.join(dataDir(), 'core.pid')).catch(() => {})
   }
+}
+
+export async function stopCore(force = false): Promise<void> {
+  await queueCoreLifecycle(() => stopCoreInternal(force))
 }
 
 async function stopChildProcess(process: ChildProcess): Promise<void> {
@@ -385,13 +534,15 @@ async function stopChildProcess(process: ChildProcess): Promise<void> {
 }
 
 export async function restartCore(): Promise<void> {
-  try {
-    await stopCore()
-    const promises = await startCore()
-    await Promise.all(promises)
-  } catch (e) {
-    dialog.showErrorBox('内核启动出错', `${e}`)
-  }
+  await queueCoreLifecycle(async () => {
+    try {
+      await stopCoreInternal()
+      const promises = await startCoreInternal()
+      await Promise.all(promises)
+    } catch (e) {
+      dialog.showErrorBox('内核启动出错', `${e}`)
+    }
+  })
 }
 
 export async function keepCoreAlive(): Promise<void> {
